@@ -1,0 +1,53 @@
+# mcpbot 部署配置示例：复制为 workdir 下的 mcpbot.yaml 后按部署环境取值。
+#
+# 文件名与位置由 wcore 的 AppContext 决定：在 workdir 下按 mcpbot.yaml / mcpbot.yml 查找。
+# 未找到配置文件时 wcore 会静默使用默认值，本站的启动核对会因此拒绝启动，不接受该形态。
+# 站点凭据段、执行预算段与 Ollama 段仅随进程重启生效；业务 MCP 服务段支持运行期受控刷新。
+
+notification:
+  # 本站无告警出站通道：日志驱动通知必须显式关闭，否则启动核对拒绝启动（RSK-007）
+  enabled: false
+
+site:
+  # 必填。留空会被启动核对判为配置缺失：权限门会自行生成 Key 并打印到日志，本站拒绝该形态。
+  # 生成方式示例：python -c "import secrets;print(secrets.token_urlsafe(24))"
+  key: "REPLACE-WITH-STATION-KEY"
+  auth_attempts_per_minute: 10   # 允许区间 [1, 60]
+  max_body_kb: 256               # 允许区间 [16, 1024]
+  history_page_max_items: 100    # 允许区间 [10, 200]
+  history_response_max_kb: 512   # 允许区间 [64, 2048]
+
+budget:
+  # 单次对话执行的资源上限，超限即进入收尾并给出可区分的终止原因（CON-010）
+  max_rounds: 8                  # 允许区间 [1, 16]
+  max_tool_calls: 12             # 允许区间 [1, 32]
+  deadline_seconds: 180          # 允许区间 [30, 600]
+  input_context_tokens: 8000     # 允许区间 [4000, 32000]
+  max_tool_result_kb: 32         # 允许区间 [1, 128]
+
+ollama:
+  base_url: "http://127.0.0.1:11434"
+  model: "REPLACE-WITH-MODEL-TAG"   # 必填，空值判为致命
+  api_key: ""                       # 只在接入边界发送给上面的地址
+  timeout_seconds: 120
+  think: false                      # 思考模式：实测小模型思考输出可达数千 token，单次推理即耗尽总时限
+
+mcp:
+  # 业务 MCP 服务集合，可为空；单条目结构无效只判该服务不可用并在启动时跳过
+  services: []
+  #  - service_id: home
+  #    url: "http://127.0.0.1:8210/mcp"
+  #    api_key: ""
+  #    allowed_tools: []            # 空集合表示该服务的工具不开放给模型选择
+
+storage:
+  data_dir: "data"                 # 五类记录的文件域根目录，启动时对其取域级独占锁
+
+web:
+  listen_host: "127.0.0.1"         # 应用绑定受控地址；对外暴露由反向代理承担（NFR-002）
+  listen_port: 8100
+  public_mode: false               # 置为 true 时页面提示传输保护依赖代理，本站不实现 TLS
+  trust_forwarded_for: false       # 仅当确实部署在可信反向代理之后才置 true；
+                                   # 否则客户端可用 X-Forwarded-For 伪造来源，绕过 Key 校验频率限额
+
+log_console_brief: true

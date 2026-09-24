@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcpbot · 自托管对话</title>
+<link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+</head>
+<body>
+<!-- 外壳可匿名加载，但不含任何聊天、记忆、配置、凭据或运行状态数据 -->
+<header id="bar">
+  <span id="title">mcpbot</span>
+  <span id="stage" class="muted">未连接</span>
+  <span class="spacer"></span>
+  <button id="load-earlier" type="button" class="ghost" hidden>加载更早</button>
+  <button id="logout" type="button" class="ghost" hidden>锁定</button>
+</header>
+
+<section id="login" class="panel">
+  <label for="key-input">本站凭据</label>
+  <input id="key-input" type="password" autocomplete="off" placeholder="仅保存在本标签页，离开即失效">
+  <button id="key-submit" type="button">校验</button>
+  <p id="login-hint" class="muted"></p>
+  {% if public_mode %}<p class="warn">公网模式：传输保护由反向代理承担，请确认地址与凭据已受控。</p>{% endif %}
+</section>
+
+<main id="thread" hidden></main>
+
+<footer id="composer" hidden>
+  <textarea id="draft" rows="3" placeholder="输入内容，Ctrl+Enter 发送"></textarea>
+  <button id="send" type="button">发送</button>
+</footer>
+
+<script src="/static/app.js?v={{ asset_v }}"></script>
+</body>
+</html>

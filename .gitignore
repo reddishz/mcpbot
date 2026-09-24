@@ -1,0 +1,22 @@
+# 设计基线只在内部版本库维护，不随公开镜像发布
+ued/
+
+# 内部共享基础库，经外部引用引入，属另一个仓库
+libs/
+
+# 版本控制元数据
+.svn/
+.git/
+
+# 运行数据与部署配置：站点凭据、记录域、日志一律不入库
+mcpbot.yaml
+mcpbot-work/
+*.log
+
+# 构建与运行产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
