@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wcore"
+version = "1.0.0"
+description = "WCore - 基础应用框架，提供配置、日志、路径等通用基础设施"
+authors = [
+    {name = "Quant Team", email = "quant@example.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+keywords = ["wcore", "config", "logging", "application-framework"]
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+telnet = [
+    "telnetlib3>=2.0",
+]
+http = [
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+]
+mcp = [
+    "mcp>=1.22",
+]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.0",
+    "black>=21.0",
+    "flake8>=3.8",
+    "mypy>=0.900",
+]
+
+[project.urls]
+Homepage = "https://github.com/quant/wcore"
+Repository = "https://github.com/quant/wcore.git"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wcore*"]
+
+[tool.setuptools.package-data]
+wcore = ["*.py", "*.md"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q --strict-markers"
+testpaths = [
+    "tests",
+]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

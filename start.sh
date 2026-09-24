@@ -24,19 +24,17 @@ PYTHON=""
 for candidate in \
     "$HOME/miniconda3/envs/$ENV_NAME/bin/python" \
     "$HOME/anaconda3/envs/$ENV_NAME/bin/python" \
-    "/opt/conda/envs/$ENV_NAME/bin/python"
+    "/opt/conda/envs/$ENV_NAME/bin/python" \
+    "$WORKDIR/venv/bin/python"
 do
     [ -x "$candidate" ] && PYTHON=$candidate && break
 done
 if [ -z "$PYTHON" ]; then
     CONDA_BASE=$(conda info --base 2>/dev/null || true)
-    [ -x "$CONDA_BASE/envs/$ENV_NAME/bin/python" ] && PYTHON="$CONDA_BASE/envs/$ENV_NAME/bin/python"
+    [ -n "$CONDA_BASE" ] && [ -x "$CONDA_BASE/envs/$ENV_NAME/bin/python" ] && PYTHON="$CONDA_BASE/envs/$ENV_NAME/bin/python"
 fi
 if [ -z "$PYTHON" ]; then
-    echo "未找到专用环境「$ENV_NAME」。先创建并安装依赖：" >&2
-    echo "  conda create -y -n $ENV_NAME python=3.13" >&2
-    echo "  conda run -n $ENV_NAME pip install -e \"$PROJECT_DIR/libs/wcore\"" >&2
-    echo "  conda run -n $ENV_NAME pip install -e \"$PROJECT_DIR[serve]\"" >&2
+    echo "未找到可用解释器（conda 环境「$ENV_NAME」或 $WORKDIR/venv）。先执行：$PROJECT_DIR/setup.sh" >&2
     exit 1
 fi
 
