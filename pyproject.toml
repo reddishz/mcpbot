@@ -15,9 +15,11 @@ serve = [
     "fastapi>=0.100",
     "uvicorn>=0.20",
 ]
-# 业务 MCP 服务接入（与 wcore 的 mcp extra 同一版本钉口径）
+# 业务 MCP 服务接入：只用 SDK 的客户端侧（IF-006/IF-007）。
+# 与 wcore 的 mcp extra 不同源：wcore 只用服务端侧，其 mcp>=1.22 在 2.x 下会失去 FastMCP。
 mcp = [
-    "mcp>=1.22",
+    "mcp>=2.2,<3",
+    "jsonschema>=4.26",
 ]
 
 [project.scripts]

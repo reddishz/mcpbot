@@ -17,7 +17,7 @@ WORKDIR=${MCPBOT_WORKDIR:-$(dirname -- "$PROJECT_DIR")/mcpbot-work}
 install_deps() {
     # $1 = 解释器绝对路径
     "$1" -m pip install --upgrade pip >/dev/null
-    "$1" -m pip install -e "$PROJECT_DIR/libs/wcore" -e "$PROJECT_DIR[serve]"
+    "$1" -m pip install -e "$PROJECT_DIR/libs/wcore" -e "$PROJECT_DIR[serve,mcp]"
 }
 
 if [ "${MCPBOT_USE_VENV:-0}" != "1" ] && command -v conda >/dev/null 2>&1; then
