@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .types import ParamSpec, Plane
 
@@ -24,6 +24,9 @@ class LeafSpec:
     readonly: bool = False
     getter: Optional[Getter] = None
     setter: Optional[Setter] = None
+    # None：沿用操作默认 scope。空元组：该操作不需要凭证。
+    read_scopes: Optional[Tuple[str, ...]] = None
+    write_scopes: Optional[Tuple[str, ...]] = None
 
 
 @dataclass
@@ -35,6 +38,8 @@ class ControlSpec:
     bind: str = ""
     params: List[ParamSpec] = field(default_factory=list)
     handler: Optional[ControlHandler] = None
+    # None：沿用 invoke 默认 scope。空元组：不需要凭证。
+    invoke_scopes: Optional[Tuple[str, ...]] = None
 
 
 @dataclass
@@ -46,9 +51,17 @@ class CatalogNode:
     children: Dict[str, Union["CatalogNode", LeafSpec, ControlSpec]] = field(
         default_factory=dict
     )
+    # None：列举该目录沿用 list 默认 scope。空元组：列举不需要凭证。
+    list_scopes: Optional[Tuple[str, ...]] = None
 
-    def add_node(self, name: str, *, plane: Optional[Plane] = None) -> "CatalogNode":
-        child = CatalogNode(name=name, plane=plane)
+    def add_node(
+        self,
+        name: str,
+        *,
+        plane: Optional[Plane] = None,
+        list_scopes: Optional[Tuple[str, ...]] = None,
+    ) -> "CatalogNode":
+        child = CatalogNode(name=name, plane=plane, list_scopes=list_scopes)
         self.children[name] = child
         return child
 

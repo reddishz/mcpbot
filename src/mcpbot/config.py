@@ -33,9 +33,8 @@ ENTRY_RANGES = {
 @config_class
 @dataclass
 class SiteSection:
-    """站点凭据与入口限额（CON-012：仅随进程重启生效）。"""
+    """本站入口限额（CON-012：仅随进程重启生效）。站点凭据不属于本段，见部署侧凭证文件。"""
 
-    key: str = config_field(default="", description="站点 Key；空值视为配置缺失并拒绝启动")
     auth_attempts_per_minute: int = config_field(
         default=ENTRY_RANGES["auth_attempts_per_minute"][0], description="Key 校验尝试频率上限（次/分钟·来源）"
     )
@@ -141,8 +140,6 @@ def validate_config(cfg: McpBotConfig) -> List[str]:
 
     faults: List[str] = []
 
-    if not cfg.site.key.strip():
-        faults.append("site.key 缺失：站点凭据为空会让 wcore 的权限门自行生成 Key 并写入日志，本站拒绝该形态")
     for name in ENTRY_RANGES:
         _range_check("site", name, getattr(cfg.site, name), ENTRY_RANGES, faults)
     for name in BUDGET_RANGES:

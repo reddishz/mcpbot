@@ -1,33 +1,53 @@
 """Web 与鉴权组件的认证与入口限额（CMP-001：IF-001、CON-011、RSK-008）。
 
-站点 Key 的比对复用 wcore 的 PrivilegeGate，并按 bind_scope="network" 使用——即不使用
-它按来源地址免密钥的 local 豁免，鉴权判定只以凭据为依据。
+站点凭据的载体与判定沿用底层框架的凭证模型：一枚 Bearer 凭据对应一组由维护者在凭证文件
+中配置的权限范围，本站不自建凭据集合，也不签发或轮换凭据。权限门按 bind_scope="network"
+使用，即不启用它按来源地址免凭据的 local 豁免，鉴权判定只以凭据为依据。
 """
 
 from __future__ import annotations
 
 import time
 from collections import defaultdict, deque
-from typing import Deque, Dict, Optional
+from pathlib import Path
+from typing import Deque, Dict, Optional, Sequence
 
 from fastapi import HTTPException, Request
-from wcore.dataplane.privilege import PRIVILEGE_QUERY, Allow, PrivilegeGate, PrivilegeSpec
+from wcore.dataplane.privilege import AccessContext, Allow, Deny, PrivilegeGate, TokenStore
 
 from .config import McpBotConfig
+
+# 凭证文件词干：框架据此得到 {stem}.tokens.yaml 与 {stem}.token-status.yaml
+TOKEN_STEM = "mcpbot"
 
 
 class SiteAuth:
     def __init__(self, cfg: McpBotConfig) -> None:
-        # 期望值非空是启动校验的前提，否则 PrivilegeGate 会自行生成 Key 并写入日志
-        self._gate = PrivilegeGate(
-            [PrivilegeSpec(name=PRIVILEGE_QUERY, expected=cfg.site.key, header="")],
-            bind_scope="network",
-        )
+        data_dir = Path(cfg.storage.data_dir).expanduser().resolve()
+        # 凭证文件缺失时由框架生成；内容非法时框架按致命处理，不在请求期才暴露
+        self.store = TokenStore(data_dir, stem=TOKEN_STEM)
+        self._gate = PrivilegeGate(self.store, bind_scope="network")
 
-    def verify(self, token: Optional[str]) -> bool:
-        # 本站只用 Bearer 一种呈现方式，因此直接给权限门 CredentialMap，不走它的 Header/Bearer 抽取
-        credentials = {PRIVILEGE_QUERY: token}
-        return self._gate.require(self._gate.resolve(credentials), PRIVILEGE_QUERY) is Allow
+    @property
+    def tokens_path(self) -> Path:
+        return self.store.tokens_path
+
+    def verify(self, authorization: Optional[str]) -> bool:
+        """只判凭据有效性，不要求任何范围——凭据校验入口按此口径。"""
+        held = self._gate.resolve(authorization)
+        if isinstance(held, Deny):
+            return False
+        return self._gate.require(held) is Allow
+
+    def authorize(
+        self,
+        authorization: Optional[str],
+        required: Sequence[str],
+        access: AccessContext,
+    ) -> Optional[str]:
+        """放行返回 None，否则返回拒绝原因码。原因码不含凭据内容，只可入日志。"""
+        outcome = self._gate.enforce(authorization, required, access=access)
+        return None if outcome is Allow else outcome.reason_code
 
 
 class AuthAttemptLimiter:
@@ -74,10 +94,3 @@ async def read_limited_body(request: Request, max_bytes: int) -> bytes:
     if len(collected) > max_bytes:
         raise HTTPException(status_code=413, detail="请求体超出上限")
     return bytes(collected)
-
-
-def bearer_of(request: Request) -> Optional[str]:
-    parts = (request.headers.get("authorization") or "").split(None, 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
-        return None
-    return parts[1].strip()
