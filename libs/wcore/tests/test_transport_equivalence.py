@@ -7,13 +7,16 @@ HTTP TestClient / MCP tools（直接 await 其函数体，等价物）断言语�
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pytest
+import yaml
 
 from wcore.dataplane.catalog import CatalogNode, ControlSpec, LeafSpec, Plane
-from wcore.dataplane.privilege import PrivilegeGate, default_w3trade_specs
+from wcore.dataplane.privilege import PrivilegeGate, TokenStore
 from wcore.dataplane.registry import PlaneRegistry
 
 try:
@@ -104,9 +107,28 @@ def _build_stack() -> tuple[PlaneRegistry, PrivilegeGate, _AppState]:
     registry = PlaneRegistry()
     catalog = _build_catalog(state)
     registry.add_instance_tree("t", catalog)
-    gate = PrivilegeGate(
-        default_w3trade_specs(query_key="Q", trade_key="T"), bind_scope="network"
+    directory = Path(tempfile.mkdtemp())
+    (directory / "demo.tokens.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "tokens": [
+                    {"id": "reader", "secret": "Q", "scopes": ["plane:read"]},
+                    {
+                        "id": "trader",
+                        "secret": "T",
+                        "scopes": ["plane:write", "plane:invoke"],
+                    },
+                    {
+                        "id": "ops",
+                        "secret": "ALL",
+                        "scopes": ["plane:read", "plane:write", "plane:invoke"],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
     )
+    gate = PrivilegeGate(TokenStore(directory, stem="demo"), bind_scope="network")
     return registry, gate, state
 
 
@@ -155,13 +177,13 @@ def test_http_read_and_list_equivalent_to_shell():
     client = FastAPITestClient(app)
 
     entries_shell = {e.name for e in reg.list_entries("t/a")}
-    resp = client.get("/api/v1/test/plane/t/a?list=1", headers={"X-Query-Key": "Q"})
+    resp = client.get("/api/v1/test/plane/t/a?list=1", headers={"Authorization": "Bearer Q"})
     assert resp.status_code == 200, resp.content
     names_http = {e["name"] for e in resp.json()["entries"]}
     assert names_http == entries_shell
 
     leaf_shell = asyncio.run(reg.read("t/a/b"))
-    resp = client.get("/api/v1/test/plane/t/a/b", headers={"X-Query-Key": "Q"})
+    resp = client.get("/api/v1/test/plane/t/a/b", headers={"Authorization": "Bearer Q"})
     assert resp.status_code == 200
     assert resp.json()["value"] == leaf_shell["value"]
     assert resp.json()["plane"] == leaf_shell["plane"]
@@ -179,7 +201,7 @@ def test_http_write_equivalent_and_unknown_params_422():
     resp = client.put(
         "/api/v1/test/plane/t/a/c",
         json={"value": 7},
-        headers={"X-Trade-Key": "T", "X-Query-Key": "Q"},
+        headers={"Authorization": "Bearer T"},
     )
     assert resp.status_code == 200, resp.content
     # 写后 shell 读取一致
@@ -190,7 +212,7 @@ def test_http_write_equivalent_and_unknown_params_422():
     resp = client.post(
         "/api/v1/test/plane/t/a/ctl",
         json={"name": "hi", "bogus": 1},
-        headers={"X-Trade-Key": "T", "X-Query-Key": "Q"},
+        headers={"Authorization": "Bearer T"},
     )
     # registry _reject_unknown_control_params 抛 ValueError -> HTTP 层 400/422
     assert resp.status_code in (400, 422, 500)
@@ -207,8 +229,7 @@ def test_mcp_tools_read_and_write_equivalent_to_shell():
     reg, gate, state = _build_stack()
     mcp_inst = wcore_mcp_mod.build_plane_mcp(reg, gate, name="eq-test")
 
-    creds = {"query": "Q", "trade": "T"}
-    token = wcore_mcp_mod._creds_var.set(creds)
+    token = wcore_mcp_mod._request_var.set({"authorization": "Bearer ALL"})
     try:
         import json
 
@@ -244,7 +265,7 @@ def test_mcp_tools_read_and_write_equivalent_to_shell():
         assert i_obj["ok"] is True
         assert state.ctl_log[-1]["name"] == "from_mcp"
     finally:
-        wcore_mcp_mod._creds_var.reset(token)
+        wcore_mcp_mod._request_var.reset(token)
 
 
 @pytest.mark.skipif(not HAS_MCP, reason="mcp optional extra")
@@ -254,8 +275,7 @@ def test_mcp_unknown_control_params_rejected():
 
     reg, gate, _ = _build_stack()
     mcp_inst = wcore_mcp_mod.build_plane_mcp(reg, gate, name="eq-test2")
-    creds = {"query": "Q", "trade": "T"}
-    token = wcore_mcp_mod._creds_var.set(creds)
+    token = wcore_mcp_mod._request_var.set({"authorization": "Bearer ALL"})
     try:
         # 未知参：FastMCP 把底层 ValueError 包装为 ToolError 抛出
         with pytest.raises(ToolError, match="unknown param"):
@@ -266,7 +286,7 @@ def test_mcp_unknown_control_params_rejected():
                 )
             )
     finally:
-        wcore_mcp_mod._creds_var.reset(token)
+        wcore_mcp_mod._request_var.reset(token)
 
 
 # --------------------------------------------------------------------------- #
@@ -286,5 +306,5 @@ def test_http_rul_046_401_equivalent_shape():
     assert resp.status_code == 401
     body = resp.json()
     # CMP-011: 结构化 code 存在
-    assert body.get("detail", {}).get("code") in {"MISSING_QUERY", "CREDENTIAL_CONFLICT"}
+    assert body.get("detail", {}).get("code") == "UNAUTHENTICATED"
     assert body["detail"]["detail"] == "Unauthorized"  # 统一外形

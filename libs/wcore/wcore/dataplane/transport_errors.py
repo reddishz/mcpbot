@@ -11,9 +11,8 @@ from typing import Any, Dict, Optional
 from wcore.dataplane.privilege import Deny
 
 # 权限类（与 HTTP/MCP 共用）
-CODE_MISSING_QUERY = "MISSING_QUERY"
-CODE_MISSING_TRADE = "MISSING_TRADE"
-CODE_CREDENTIAL_CONFLICT = "CREDENTIAL_CONFLICT"
+CODE_UNAUTHENTICATED = "UNAUTHENTICATED"
+CODE_INSUFFICIENT_SCOPE = "INSUFFICIENT_SCOPE"
 CODE_UNKNOWN_OPERATION = "UNKNOWN_OPERATION"
 CODE_FORBIDDEN = "FORBIDDEN"
 
@@ -29,23 +28,16 @@ CODE_RATE_LIMITED = "RATE_LIMITED"
 def deny_to_payload(outcome: Deny) -> Dict[str, Any]:
     """Deny(reason_code) → 传输无关 payload。"""
     code = outcome.reason_code
-    if code.startswith("missing_privilege:query"):
+    if code == "unauthenticated":
         return {
-            "code": CODE_MISSING_QUERY,
+            "code": CODE_UNAUTHENTICATED,
             "status": 401,
             "detail": "Unauthorized",
             "reason": code,
         }
-    if code.startswith("credential_conflict:"):
+    if code.startswith("missing_scope:"):
         return {
-            "code": CODE_CREDENTIAL_CONFLICT,
-            "status": 401,
-            "detail": "Unauthorized",
-            "reason": code,
-        }
-    if code.startswith("missing_privilege:trade"):
-        return {
-            "code": CODE_MISSING_TRADE,
+            "code": CODE_INSUFFICIENT_SCOPE,
             "status": 403,
             "detail": "Forbidden",
             "reason": code,

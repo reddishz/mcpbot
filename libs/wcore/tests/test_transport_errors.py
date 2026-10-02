@@ -9,10 +9,10 @@ import pytest
 
 from wcore.dataplane.privilege import Deny
 from wcore.dataplane.transport_errors import (
+    CODE_INSUFFICIENT_SCOPE,
     CODE_METHOD_NOT_ALLOWED,
-    CODE_MISSING_QUERY,
-    CODE_MISSING_TRADE,
     CODE_NOT_FOUND,
+    CODE_UNAUTHENTICATED,
     CODE_UNKNOWN_PARAM,
     deny_to_payload,
     registry_exc_to_payload,
@@ -20,9 +20,10 @@ from wcore.dataplane.transport_errors import (
 
 
 def test_deny_to_payload_codes():
-    assert deny_to_payload(Deny("missing_privilege:query"))["code"] == CODE_MISSING_QUERY
-    assert deny_to_payload(Deny("missing_privilege:trade"))["code"] == CODE_MISSING_TRADE
-    assert deny_to_payload(Deny("credential_conflict:query"))["status"] == 401
+    assert deny_to_payload(Deny("unauthenticated"))["code"] == CODE_UNAUTHENTICATED
+    assert deny_to_payload(Deny("unauthenticated"))["status"] == 401
+    assert deny_to_payload(Deny("missing_scope:plane:write"))["code"] == CODE_INSUFFICIENT_SCOPE
+    assert deny_to_payload(Deny("missing_scope:plane:write"))["status"] == 403
 
 
 def test_registry_exc_codes():
@@ -49,7 +50,7 @@ def test_mcp_tool_surfaces_not_found_code():
 
     reg, gate, _ = _build_stack()
     mcp_inst = wcore_mcp_mod.build_plane_mcp(reg, gate, name="err-test")
-    token = wcore_mcp_mod._creds_var.set({"query": "Q", "trade": "T"})
+    token = wcore_mcp_mod._request_var.set({"authorization": "Bearer ALL"})
     try:
         with pytest.raises(ToolError) as ei:
             asyncio.run(mcp_inst.call_tool("plane_read", {"path": "no/such/leaf"}))
@@ -60,7 +61,7 @@ def test_mcp_tool_surfaces_not_found_code():
         assert payload["code"] == CODE_NOT_FOUND
         assert payload["status"] == 404
     finally:
-        wcore_mcp_mod._creds_var.reset(token)
+        wcore_mcp_mod._request_var.reset(token)
 
 
 @pytest.mark.skipif(
@@ -75,7 +76,7 @@ def test_mcp_tool_surfaces_unknown_param_code():
 
     reg, gate, _ = _build_stack()
     mcp_inst = wcore_mcp_mod.build_plane_mcp(reg, gate, name="err-test2")
-    token = wcore_mcp_mod._creds_var.set({"query": "Q", "trade": "T"})
+    token = wcore_mcp_mod._request_var.set({"authorization": "Bearer ALL"})
     try:
         with pytest.raises(ToolError) as ei:
             asyncio.run(
@@ -90,4 +91,4 @@ def test_mcp_tool_surfaces_unknown_param_code():
         assert payload["code"] == CODE_UNKNOWN_PARAM
         assert payload["status"] == 422
     finally:
-        wcore_mcp_mod._creds_var.reset(token)
+        wcore_mcp_mod._request_var.reset(token)

@@ -207,7 +207,12 @@ def test_multi_instance():
     assert g_entry.path == "global/g"
     assert reg.inspect_path("global") == "dir"
     assert reg.inspect_path("global/state") == "missing"
-    assert "unknown segment" in reg.path_hint("global/state", "state")
+    hint = reg.path_hint("global/state", "state")
+    assert "unknown segment" in hint
+    assert "w3trade" not in hint
+    root_hint = reg.path_hint("nope", "nope")
+    assert "plane root" in root_hint
+    assert "w3trade" not in root_hint
 
 
 def test_read_subtree_marks_intermediate_dirs():

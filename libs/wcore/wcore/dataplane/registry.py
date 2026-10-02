@@ -41,6 +41,8 @@ class _DataLeaf:
     readonly: bool
     getter: Callable[[], Any]
     setter: Optional[Callable[[Any], Any]]
+    read_scopes: Optional[Tuple[str, ...]] = None
+    write_scopes: Optional[Tuple[str, ...]] = None
 
 
 @dataclass
@@ -49,10 +51,19 @@ class _ControlLeaf:
     description: str
     params: List[Any]
     handler: Callable[[Dict[str, Any]], Any]
+    invoke_scopes: Optional[Tuple[str, ...]] = None
 
 
 class _TreeNode:
-    __slots__ = ("name", "parent", "plane", "namespaces", "leaves", "controls")
+    __slots__ = (
+        "name",
+        "parent",
+        "plane",
+        "namespaces",
+        "leaves",
+        "controls",
+        "list_scopes",
+    )
 
     def __init__(self, name: str, parent: Optional["_TreeNode"]) -> None:
         self.name = name
@@ -61,6 +72,7 @@ class _TreeNode:
         self.namespaces: Dict[str, _TreeNode] = {}
         self.leaves: Dict[str, _DataLeaf] = {}
         self.controls: Dict[str, _ControlLeaf] = {}
+        self.list_scopes: Optional[Tuple[str, ...]] = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +143,7 @@ class PlaneRegistry:
                 child_plane = child.plane or plane
                 if child_plane is not None:
                     ns.plane = child_plane
+                ns.list_scopes = child.list_scopes
                 self._mount_catalog(ns, child, inherited_plane=child_plane or plane)
             elif isinstance(child, LeafSpec):
                 spec = child
@@ -151,6 +164,8 @@ class PlaneRegistry:
                     readonly=readonly,
                     getter=spec.getter,
                     setter=setter,
+                    read_scopes=spec.read_scopes,
+                    write_scopes=spec.write_scopes,
                 )
             elif isinstance(child, ControlSpec):
                 spec = child
@@ -161,6 +176,7 @@ class PlaneRegistry:
                     description=spec.description,
                     params=list(spec.params),
                     handler=spec.handler,
+                    invoke_scopes=spec.invoke_scopes,
                 )
 
     @staticmethod
@@ -220,6 +236,39 @@ class PlaneRegistry:
             )
         return out
 
+    def declared_scopes(self, path: str, operation: str) -> Optional[Tuple[str, ...]]:
+        """路径上显式声明的 scope。
+
+        None 表示沿用操作默认映射（路径不存在时也是 None，避免把缺失当成公开）。
+        空元组表示该操作不需要凭证。
+        """
+        parts = self.split_path(path)
+        if operation == "list":
+            try:
+                node = self._node_at(parts) if parts else self._root
+            except KeyError:
+                return None
+            return node.list_scopes
+        if operation == "read":
+            try:
+                _, leaf = self._resolve_data(parts)
+            except KeyError:
+                return None
+            return leaf.read_scopes
+        if operation == "write":
+            try:
+                _, leaf = self._resolve_data(parts)
+            except KeyError:
+                return None
+            return leaf.write_scopes
+        if operation == "invoke":
+            try:
+                _, ctrl = self._resolve_control(parts)
+            except KeyError:
+                return None
+            return ctrl.invoke_scopes
+        return None
+
     def inspect_path(self, path: str) -> str:
         """Return ``root`` | ``dir`` | ``leaf`` | ``control`` | ``missing``."""
         parts = self.split_path(path)
@@ -264,7 +313,7 @@ class PlaneRegistry:
             )
         return (
             f"unknown segment '{segment}'. "
-            "Start discovery at GET /api/v1/w3trade/plane?list=1 "
+            "Start discovery at the plane root with ?list=1 "
             "(instances → themes → endpoints)."
         )
 
@@ -286,7 +335,13 @@ class PlaneRegistry:
             raise KeyError(name)
         return parent_parts, node.controls[name]
 
-    async def read(self, path: str, *, depth: int = 0) -> Any:
+    async def read(
+        self,
+        path: str,
+        *,
+        depth: int = 0,
+        can_read_leaf: Optional[Callable[[Optional[Tuple[str, ...]]], bool]] = None,
+    ) -> Any:
         parts = self.split_path(path)
         if depth <= 0:
             _, leaf = self._resolve_data(parts)
@@ -304,9 +359,18 @@ class PlaneRegistry:
             }
 
         node = self._node_at(parts) if parts else self._root
-        return await self._read_subtree(node, parts, max_depth=depth)
+        return await self._read_subtree(
+            node, parts, max_depth=depth, can_read_leaf=can_read_leaf
+        )
 
-    async def _read_subtree(self, node: _TreeNode, prefix: List[str], *, max_depth: int) -> Dict[str, Any]:
+    async def _read_subtree(
+        self,
+        node: _TreeNode,
+        prefix: List[str],
+        *,
+        max_depth: int,
+        can_read_leaf: Optional[Callable[[Optional[Tuple[str, ...]]], bool]] = None,
+    ) -> Dict[str, Any]:
         if max_depth <= 0:
             return {}
         out: Dict[str, Any] = {
@@ -330,9 +394,21 @@ class PlaneRegistry:
                 children[name] = entry
             else:
                 children[name] = await self._read_subtree(
-                    ns_node, child_path, max_depth=max_depth - 1
+                    ns_node,
+                    child_path,
+                    max_depth=max_depth - 1,
+                    can_read_leaf=can_read_leaf,
                 )
         for name, leaf in node.leaves.items():
+            if can_read_leaf is not None and not can_read_leaf(leaf.read_scopes):
+                children[name] = {
+                    "kind": "leaf",
+                    "plane": leaf.plane.value,
+                    "type": type_label(leaf.value_type),
+                    "readonly": leaf.readonly,
+                    "restricted": True,
+                }
+                continue
             try:
                 val = leaf.getter()
                 if inspect.isawaitable(val):

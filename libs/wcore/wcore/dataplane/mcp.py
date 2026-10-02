@@ -14,7 +14,13 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Mapping, Optional
 
-from wcore.dataplane.privilege import Deny, PrivilegeGate
+from wcore.dataplane.privilege import (
+    AccessContext,
+    Deny,
+    PrivilegeGate,
+    leaf_visible,
+    resolve_client_ip,
+)
 from wcore.dataplane.registry import PlaneRegistry
 from wcore.dataplane.transport_errors import (
     mcp_error_from_deny,
@@ -23,13 +29,12 @@ from wcore.dataplane.transport_errors import (
 
 logger = logging.getLogger(__name__)
 
-_creds_var: contextvars.ContextVar[Mapping[str, Optional[str]]] = contextvars.ContextVar(
-    "wcore_mcp_creds", default={}
+_request_var: contextvars.ContextVar[Mapping[str, str]] = contextvars.ContextVar(
+    "wcore_mcp_request", default={}
 )
 
 try:
     from mcp.server.fastmcp import FastMCP
-    from starlette.responses import JSONResponse
     from starlette.types import ASGIApp, Receive, Scope, Send
 
     HAS_MCP = True
@@ -38,14 +43,29 @@ except ImportError:  # pragma: no cover
     FastMCP = Any  # type: ignore[misc, assignment]
 
 
-def _require(gate: PrivilegeGate, operation_kind: str) -> None:
-    creds = _creds_var.get()
-    conflicts = creds.get("_conflicts") if isinstance(creds, dict) else None
-    base = {k: v for k, v in creds.items() if k != "_conflicts"} if isinstance(creds, dict) else creds
-    pset = gate.resolve(base, conflicts=conflicts)
-    if isinstance(pset, Deny):
-        raise mcp_error_from_deny(pset)
-    outcome = gate.require_op(pset, operation_kind)  # type: ignore[arg-type]
+def _require(
+    gate: PrivilegeGate,
+    registry: PlaneRegistry,
+    operation_kind: str,
+    path: str,
+) -> None:
+    ctx = dict(_request_var.get() or {})
+    declared = registry.declared_scopes(path, operation_kind)
+    required = gate.required_scopes(operation_kind, declared=declared)
+    if isinstance(required, Deny):
+        raise mcp_error_from_deny(required)
+    if not required:
+        return
+    outcome = gate.enforce(
+        ctx.get("authorization"),
+        required,
+        access=AccessContext(
+            client_ip=ctx.get("client_ip", ""),
+            peer=ctx.get("peer", ""),
+            permission=",".join(required),
+            api=f"mcp {operation_kind} {path or '/'}",
+        ),
+    )
     if isinstance(outcome, Deny):
         raise mcp_error_from_deny(outcome)
 
@@ -67,7 +87,7 @@ def build_plane_mcp(
 
     @mcp.tool(description="List plane directory children (operation: list)")
     async def plane_list(path: str = "") -> Dict[str, Any]:
-        _require(gate, "list")
+        _require(gate, registry, "list", path)
         try:
             entries = registry.list_entries(path)
         except (KeyError, PermissionError, ValueError) as exc:
@@ -89,15 +109,20 @@ def build_plane_mcp(
 
     @mcp.tool(description="Read plane leaf or subtree (operation: read)")
     async def plane_read(path: str, depth: int = 0) -> Any:
-        _require(gate, "read")
+        _require(gate, registry, "read", path)
         try:
-            return await registry.read(path, depth=depth)
+            held = gate.held(_request_var.get().get("authorization"))
+            return await registry.read(
+                path,
+                depth=depth,
+                can_read_leaf=lambda scopes: leaf_visible(held, scopes),
+            )
         except (KeyError, PermissionError, ValueError) as exc:
             raise mcp_error_from_exc(exc, path=path) from exc
 
     @mcp.tool(description="Write config/runtime leaf (operation: write)")
     async def plane_write(path: str, value: Any) -> Any:
-        _require(gate, "write")
+        _require(gate, registry, "write", path)
         try:
             return await registry.write(path, value)
         except (KeyError, PermissionError, ValueError) as exc:
@@ -105,7 +130,7 @@ def build_plane_mcp(
 
     @mcp.tool(description="Invoke control endpoint (operation: invoke)")
     async def plane_invoke(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        _require(gate, "invoke")
+        _require(gate, registry, "invoke", path)
         try:
             result = await registry.invoke(path, params or {})
         except (KeyError, PermissionError, ValueError) as exc:
@@ -116,15 +141,10 @@ def build_plane_mcp(
 
 
 class PrivilegeGateASGIMiddleware:
-    """MCP 传输层准入：网络域 **MUST** 持有 ``query``（策略 A / WC-RUL-046）。
+    """把本次 HTTP 的 Bearer 与来源地址放进上下文。
 
-    @satisfies WC-RUL-046 / WC-DEC-013 / WC-DEC-019
-
-    层次：
-    * **框架**：Streamable HTTP 任意动词/子路径（含 initialize / tools/list）
-      一律 ``require_op(..., "list")`` → 规范名 ``query``；不识别应用业务权限名。
-    * **应用**：写/invoke 等高级权限（如 w3trade 的 ``trade``）仅经 ``op_map``
-      在各 tool 的 ``_require(kind)`` 判定，**MUST NOT** 在本中间件写死。
+    initialize / tools/list 不在这里鉴权（只暴露四个固定 tool 名）。
+    具体路径的 scope 在 tool 内按与 HTTP 相同的声明判定。
     """
 
     def __init__(self, app: "ASGIApp", gate: PrivilegeGate) -> None:
@@ -141,50 +161,22 @@ class PrivilegeGateASGIMiddleware:
             )
             for k, v in scope.get("headers", [])
         }
-        creds, conflicts = self.gate.extract_http_credentials(
-            header_map,
-            authorization=header_map.get("authorization"),
+        client = scope.get("client")
+        peer = ""
+        if isinstance(client, (list, tuple)) and client:
+            peer = str(client[0] or "")
+        client_ip, peer = resolve_client_ip(header_map, peer)
+        token = _request_var.set(
+            {
+                "authorization": header_map.get("authorization", ""),
+                "client_ip": client_ip,
+                "peer": peer,
+            }
         )
-        creds_with_meta = dict(creds)
-        if conflicts:
-            creds_with_meta["_conflicts"] = set(conflicts)
-        token = _creds_var.set(creds_with_meta)
-
         try:
-            from wcore.dataplane.transport_errors import deny_to_payload
-
-            pset = self.gate.resolve(creds, conflicts=conflicts)
-            if isinstance(pset, Deny):
-                payload = deny_to_payload(pset)
-                resp = JSONResponse(
-                    {
-                        "detail": payload["detail"],
-                        "code": payload["code"],
-                        "reason": payload["reason"],
-                    },
-                    status_code=int(payload["status"]),
-                )
-                await resp(scope, receive, send)
-                return
-
-            # 策略 A：传输地板 = query（list→op_map）；发现与会话均不可绕过
-            outcome = self.gate.require_op(pset, "list")  # type: ignore[arg-type]
-            if isinstance(outcome, Deny):
-                payload = deny_to_payload(outcome)
-                resp = JSONResponse(
-                    {
-                        "detail": payload["detail"],
-                        "code": payload["code"],
-                        "reason": payload["reason"],
-                    },
-                    status_code=int(payload["status"]),
-                )
-                await resp(scope, receive, send)
-                return
-
             await self.app(scope, receive, send)
         finally:
-            _creds_var.reset(token)
+            _request_var.reset(token)
 
 
 class RewriteExactPrefixSlash:

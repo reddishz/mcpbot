@@ -13,7 +13,13 @@ try:
 except ImportError:  # pragma: no cover
     HAS_FASTAPI = False
 
-from wcore.dataplane.privilege import Deny, PrivilegeGate
+from wcore.dataplane.privilege import (
+    AccessContext,
+    Deny,
+    PrivilegeGate,
+    leaf_visible,
+    resolve_client_ip,
+)
 from wcore.dataplane.registry import EntryMeta, PlaneRegistry
 from wcore.dataplane.transport_errors import (
     CODE_RATE_LIMITED,
@@ -31,10 +37,10 @@ DEFAULT_PLANE_DESCRIPTION = """
 
 Canonical plane REST over theme/endpoint paths (WC-D009).
 
-### Auth (WC-D012)
+### Auth
 
-- GET (list/read): `X-Query-Key` (or Bearer → query)
-- PUT / POST: `X-Trade-Key`
+`Authorization: Bearer`. Each path declares scopes; omitted uses the operation default
+(`plane:read` / `plane:write` / `plane:invoke`). An explicit empty list needs no token.
 """
 
 PLANE_GET_SUMMARY = "Read plane path (leaf, directory discovery, or depth subtree)"
@@ -105,9 +111,7 @@ def create_plane_router(
         description="Set to 1 to list immediate children.",
     )
     depth_q = Query(0, ge=0, description="Sub-tree expansion depth.")
-    query_hdr = Header(None, alias="X-Query-Key", description="query privilege key")
-    trade_hdr = Header(None, alias="X-Trade-Key", description="trade privilege key")
-    auth_hdr = Header(None, alias="Authorization", description="Bearer → query")
+    auth_hdr = Header(None, alias="Authorization", description="Bearer token")
 
     router = APIRouter(tags=[tag], redirect_slashes=False)
 
@@ -141,27 +145,42 @@ def create_plane_router(
             )
         raise HTTPException(status_code=int(payload["status"]), detail=detail)
 
+    def _client_bits(request: Any) -> tuple:
+        peer = ""
+        client = getattr(request, "client", None)
+        if client is not None and getattr(client, "host", None):
+            peer = str(client.host)
+        headers = {str(k).lower(): str(v) for k, v in request.headers.items()}
+        return resolve_client_ip(headers, peer)
+
     def _authorize(
         operation_kind: str,
         *,
-        x_query_key: Optional[str],
-        x_trade_key: Optional[str],
+        path: str,
         authorization: Optional[str],
+        request: Any,
         path_for_rate: str = "",
     ) -> None:
-        # 先鉴权再流控：无钥/错钥不得因配额返回 429（防枚举与诊断混淆）
-        headers = {}
-        if x_query_key is not None:
-            headers["X-Query-Key"] = x_query_key
-        if x_trade_key is not None:
-            headers["X-Trade-Key"] = x_trade_key
-        creds, conflicts = gate.extract_http_credentials(headers, authorization=authorization)
-        pset = gate.resolve(creds, conflicts=conflicts)
-        if isinstance(pset, Deny):
-            _http_deny(pset)
-        outcome = gate.require_op(pset, operation_kind)  # type: ignore[arg-type]
-        if isinstance(outcome, Deny):
-            _http_deny(outcome)
+        # 先鉴权再流控：无凭证不得因配额返回 429
+        declared = registry.declared_scopes(path, operation_kind)
+        required = gate.required_scopes(operation_kind, declared=declared)
+        if isinstance(required, Deny):
+            _http_deny(required)
+            return
+        if required:
+            client_ip, peer = _client_bits(request)
+            outcome = gate.enforce(
+                authorization,
+                required,
+                access=AccessContext(
+                    client_ip=client_ip,
+                    peer=peer,
+                    permission=",".join(required),
+                    api=f"http {operation_kind} {path or '/'}",
+                ),
+            )
+            if isinstance(outcome, Deny):
+                _http_deny(outcome)
         if operation_kind in ("write", "invoke") and check_write_rate is not None:
             if not check_write_rate(path_for_rate):
                 raise HTTPException(
@@ -170,10 +189,10 @@ def create_plane_router(
                 )
 
     async def plane_get(
+        request: Request,
         full_path: str = "",
         list: int = list_q,
         depth: int = depth_q,
-        x_query_key: Optional[str] = query_hdr,
         authorization: Optional[str] = auth_hdr,
     ):
         path = full_path.strip("/")
@@ -182,7 +201,7 @@ def create_plane_router(
             op = "list"
         else:
             op = "read"
-        _authorize(op, x_query_key=x_query_key, x_trade_key=None, authorization=authorization)
+        _authorize(op, path=path, authorization=authorization, request=request)
 
         if list:
             if kind == "missing":
@@ -196,23 +215,27 @@ def create_plane_router(
             raise _not_found(registry, path, registry.missing_segment(path))
 
         try:
-            return await registry.read(path, depth=depth)
+            held = gate.held(authorization)
+            return await registry.read(
+                path,
+                depth=depth,
+                can_read_leaf=lambda scopes: leaf_visible(held, scopes),
+            )
         except (KeyError, PermissionError, ValueError) as exc:
             _http_registry_exc(exc, path)
 
     async def plane_put(
+        request: Request,
         full_path: str,
         body: Dict[str, Any] = Body(...),
-        x_trade_key: Optional[str] = trade_hdr,
-        x_query_key: Optional[str] = query_hdr,
         authorization: Optional[str] = auth_hdr,
     ):
         path = full_path.strip("/")
         _authorize(
             "write",
-            x_query_key=x_query_key,
-            x_trade_key=x_trade_key,
+            path=path,
             authorization=authorization,
+            request=request,
             path_for_rate=path,
         )
         if "value" not in body:
@@ -234,18 +257,17 @@ def create_plane_router(
             _http_registry_exc(exc, path)
 
     async def plane_post(
+        request: Request,
         full_path: str,
         body: Optional[Dict[str, Any]] = Body(default=None),
-        x_trade_key: Optional[str] = trade_hdr,
-        x_query_key: Optional[str] = query_hdr,
         authorization: Optional[str] = auth_hdr,
     ):
         path = full_path.strip("/")
         _authorize(
             "invoke",
-            x_query_key=x_query_key,
-            x_trade_key=x_trade_key,
+            path=path,
             authorization=authorization,
+            request=request,
             path_for_rate=path,
         )
         try:
@@ -346,7 +368,7 @@ def mount_plane_http(
 
 
 def install_openapi_privilege_gate(app: Any, gate: PrivilegeGate) -> None:
-    """网络域下 OpenAPI / docs 须持有 query（WC-RUL-046）。
+    """网络域下 OpenAPI / docs 须持有 plane:read。
 
     @satisfies WC-RUL-046 #1
     """
@@ -358,13 +380,13 @@ def install_openapi_privilege_gate(app: Any, gate: PrivilegeGate) -> None:
         path = request.url.path
         if path.endswith("/openapi.json") or path in ("/docs", "/redoc") or path.endswith("/docs") or path.endswith("/redoc"):
             headers = {k: v for k, v in request.headers.items()}
-            creds, conflicts = gate.extract_http_credentials(
+            client_ip, peer = resolve_client_ip(
                 headers,
-                authorization=request.headers.get("authorization"),
+                request.client.host if request.client else "",
             )
-            pset = gate.resolve(creds, conflicts=conflicts)
-            if isinstance(pset, Deny):
-                payload = deny_to_payload(pset)
+            required = gate.required_scopes("openapi")
+            if isinstance(required, Deny):
+                payload = deny_to_payload(required)
                 return JSONResponse(
                     status_code=int(payload["status"]),
                     content={
@@ -373,7 +395,16 @@ def install_openapi_privilege_gate(app: Any, gate: PrivilegeGate) -> None:
                         "reason": payload["reason"],
                     },
                 )
-            outcome = gate.require_op(pset, "openapi")  # type: ignore[arg-type]
+            outcome = gate.enforce(
+                request.headers.get("authorization"),
+                required,  # type: ignore[arg-type]
+                access=AccessContext(
+                    client_ip=client_ip,
+                    peer=peer,
+                    permission=",".join(required),  # type: ignore[arg-type]
+                    api="http openapi /openapi.json",
+                ),
+            )
             if isinstance(outcome, Deny):
                 payload = deny_to_payload(outcome)
                 return JSONResponse(

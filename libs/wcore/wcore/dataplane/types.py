@@ -23,9 +23,13 @@ class ControlResult:
     ok: bool
     code: str
     message: str
+    data: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"ok": self.ok, "code": self.code, "message": self.message}
+        out: Dict[str, Any] = {"ok": self.ok, "code": self.code, "message": self.message}
+        if self.data is not None:
+            out["data"] = self.data
+        return out
 
 
 @dataclass
