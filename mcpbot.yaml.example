@@ -2,16 +2,17 @@
 #
 # 文件名与位置由 wcore 的 AppContext 决定：在 workdir 下按 mcpbot.yaml / mcpbot.yml 查找。
 # 未找到配置文件时 wcore 会静默使用默认值，本站的启动核对会因此拒绝启动，不接受该形态。
-# 站点凭据段、执行预算段与 Ollama 段仅随进程重启生效；业务 MCP 服务段支持运行期受控刷新。
+# 执行预算段与 Ollama 段仅随进程重启生效；业务 MCP 服务段支持运行期受控刷新。
+#
+# 站点凭据不在本文件：它由 data/ 下的凭证文件（mcpbot.tokens.yaml）承载，首次启动时由底层框架
+# 生成，一枚凭据对应一组由维护者配置的权限范围，更换随进程重启生效。
 
 notification:
   # 本站无告警出站通道：日志驱动通知必须显式关闭，否则启动核对拒绝启动（RSK-007）
   enabled: false
 
 site:
-  # 必填。留空会被启动核对判为配置缺失：权限门会自行生成 Key 并打印到日志，本站拒绝该形态。
-  # 生成方式示例：python -c "import secrets;print(secrets.token_urlsafe(24))"
-  key: "REPLACE-WITH-STATION-KEY"
+  # 本站入口资源限额；站点凭据见文件头说明，不在本段。
   auth_attempts_per_minute: 10   # 允许区间 [1, 60]
   max_body_kb: 256               # 允许区间 [16, 1024]
   history_page_max_items: 100    # 允许区间 [10, 200]

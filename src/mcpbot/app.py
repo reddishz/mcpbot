@@ -12,7 +12,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import AsyncIterator, Dict, List, Optional
+from typing import AsyncIterator, Dict, List, Optional, Sequence, Tuple
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -20,8 +20,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from wcore.app_context import AppContext
+from wcore.dataplane.privilege import AccessContext, PLANE_READ, PLANE_WRITE
 
-from .auth import AuthAttemptLimiter, SiteAuth, bearer_of, client_source, read_limited_body
+from .auth import AuthAttemptLimiter, SiteAuth, client_source, read_limited_body
 from .config import McpBotConfig, unavailable_services, validate_config
 from .durable import DomainLock, DomainLockHeld, PersistenceUnavailable
 from .history import HistoryStore
@@ -62,11 +63,31 @@ def create_app(state: AppState) -> FastAPI:
     def current_state(request: Request) -> AppState:
         return request.app.state.mcpbot
 
-    async def require_site_key(request: Request) -> None:
-        state = current_state(request)
-        if not state.auth.verify(bearer_of(request)):
-            # 本站 401：页面据此清理当前标签页 Key 并关闭敏感视图
-            raise HTTPException(status_code=401, detail="本站凭据校验未通过")
+    def _entry_guard(required_scopes: Sequence[str]):
+        """按 IF-001 的范围口径生成入口依赖：凭据无效与范围不足同形呈现，不披露所缺范围。"""
+
+        async def guard(request: Request) -> None:
+            state = current_state(request)
+            peer = request.client.host if request.client else "unknown"
+            outcome = state.auth.authorize(
+                request.headers.get("authorization"),
+                tuple(required_scopes),
+                AccessContext(
+                    client_ip=client_source(request, state.cfg.web.trust_forwarded_for),
+                    peer=peer,
+                    permission=",".join(required_scopes),
+                    api=request.url.path,
+                ),
+            )
+            if outcome is not None:
+                # 原因码只入本站运行记录，不回显给请求方（NFR-011、IF-001）
+                state.log.warning("入口 %s 未放行：%s", request.url.path, outcome)
+                raise HTTPException(status_code=401, detail="本站凭据校验未通过")
+
+        return guard
+
+    require_write = _entry_guard((PLANE_WRITE,))
+    require_read = _entry_guard((PLANE_READ,))
 
     @app.get("/", response_class=HTMLResponse)
     async def shell(request: Request) -> HTMLResponse:
@@ -87,11 +108,11 @@ def create_app(state: AppState) -> FastAPI:
                 content={"detail": "校验尝试频率超限", "retry_after_seconds": retry_after},
                 headers={"Retry-After": str(retry_after)},
             )
-        if not state.auth.verify(bearer_of(request)):
+        if not state.auth.verify(request.headers.get("authorization")):
             raise HTTPException(status_code=401, detail="本站凭据校验未通过")
         return JSONResponse({"result": "校验成功"})
 
-    @app.post("/api/chat", dependencies=[Depends(require_site_key)])
+    @app.post("/api/chat", dependencies=[Depends(require_write)])
     async def chat(request: Request) -> StreamingResponse:
         state = current_state(request)
         body = await _json_body(request, state.cfg.site.max_body_kb)
@@ -145,7 +166,7 @@ def create_app(state: AppState) -> FastAPI:
 
         return StreamingResponse(frames(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
 
-    @app.get("/api/history", dependencies=[Depends(require_site_key)])
+    @app.get("/api/history", dependencies=[Depends(require_read)])
     async def history_read(request: Request, cursor: Optional[str] = None, limit: int = 20) -> JSONResponse:
         state = current_state(request)
         page_limit = max(1, min(limit, state.cfg.site.history_page_max_items))
@@ -257,6 +278,8 @@ def main() -> int:
         data_dir,
         cfg.web.public_mode,
     )
+    # 只打印凭证文件位置，不打印其内容：登录凭据由维护者自行取用
+    log.info("站点凭据文件：%s", state.auth.tokens_path)
     try:
         # 单进程固定：同事务域与在途快照语义不支撑多 worker（ADR-002 横向扩展不作承诺）
         uvicorn.run(app, host=cfg.web.listen_host, port=cfg.web.listen_port, log_level="warning", access_log=False)
