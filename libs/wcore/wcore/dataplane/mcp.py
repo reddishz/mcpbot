@@ -16,6 +16,10 @@ from typing import Any, AsyncIterator, Dict, Mapping, Optional
 
 from wcore.dataplane.privilege import Deny, PrivilegeGate
 from wcore.dataplane.registry import PlaneRegistry
+from wcore.dataplane.transport_errors import (
+    mcp_error_from_deny,
+    mcp_error_from_exc,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +39,15 @@ except ImportError:  # pragma: no cover
 
 
 def _require(gate: PrivilegeGate, operation_kind: str) -> None:
-    pset = gate.resolve(_creds_var.get())
-    outcome = gate.require_op(pset, operation_kind)
+    creds = _creds_var.get()
+    conflicts = creds.get("_conflicts") if isinstance(creds, dict) else None
+    base = {k: v for k, v in creds.items() if k != "_conflicts"} if isinstance(creds, dict) else creds
+    pset = gate.resolve(base, conflicts=conflicts)
+    if isinstance(pset, Deny):
+        raise mcp_error_from_deny(pset)
+    outcome = gate.require_op(pset, operation_kind)  # type: ignore[arg-type]
     if isinstance(outcome, Deny):
-        raise PermissionError(outcome.reason_code)
+        raise mcp_error_from_deny(outcome)
 
 
 def build_plane_mcp(
@@ -47,7 +56,10 @@ def build_plane_mcp(
     *,
     name: str = "wcore-plane",
 ) -> Any:
-    """构造 FastMCP 实例（四操作 tools）。"""
+    """构造 FastMCP 实例（四操作 tools）。
+
+    @satisfies WC-CMP-001 / WC-R025 / WC-R026
+    """
     if not HAS_MCP:
         raise RuntimeError("mcp package required for MCP plane (optional extra)")
 
@@ -56,7 +68,10 @@ def build_plane_mcp(
     @mcp.tool(description="List plane directory children (operation: list)")
     async def plane_list(path: str = "") -> Dict[str, Any]:
         _require(gate, "list")
-        entries = registry.list_entries(path)
+        try:
+            entries = registry.list_entries(path)
+        except (KeyError, PermissionError, ValueError) as exc:
+            raise mcp_error_from_exc(exc, path=path) from exc
         return {
             "path": path.strip("/") or "/",
             "kind": "dir",
@@ -75,24 +90,42 @@ def build_plane_mcp(
     @mcp.tool(description="Read plane leaf or subtree (operation: read)")
     async def plane_read(path: str, depth: int = 0) -> Any:
         _require(gate, "read")
-        return await registry.read(path, depth=depth)
+        try:
+            return await registry.read(path, depth=depth)
+        except (KeyError, PermissionError, ValueError) as exc:
+            raise mcp_error_from_exc(exc, path=path) from exc
 
     @mcp.tool(description="Write config/runtime leaf (operation: write)")
     async def plane_write(path: str, value: Any) -> Any:
         _require(gate, "write")
-        return await registry.write(path, value)
+        try:
+            return await registry.write(path, value)
+        except (KeyError, PermissionError, ValueError) as exc:
+            raise mcp_error_from_exc(exc, path=path) from exc
 
     @mcp.tool(description="Invoke control endpoint (operation: invoke)")
     async def plane_invoke(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         _require(gate, "invoke")
-        result = await registry.invoke(path, params or {})
+        try:
+            result = await registry.invoke(path, params or {})
+        except (KeyError, PermissionError, ValueError) as exc:
+            raise mcp_error_from_exc(exc, path=path) from exc
         return result.to_dict()
 
     return mcp
 
 
 class PrivilegeGateASGIMiddleware:
-    """解析凭证入 contextvars；无 query 则 401（防枚举）。"""
+    """MCP 传输层准入：网络域 **MUST** 持有 ``query``（策略 A / WC-RUL-046）。
+
+    @satisfies WC-RUL-046 / WC-DEC-013 / WC-DEC-019
+
+    层次：
+    * **框架**：Streamable HTTP 任意动词/子路径（含 initialize / tools/list）
+      一律 ``require_op(..., "list")`` → 规范名 ``query``；不识别应用业务权限名。
+    * **应用**：写/invoke 等高级权限（如 w3trade 的 ``trade``）仅经 ``op_map``
+      在各 tool 的 ``_require(kind)`` 判定，**MUST NOT** 在本中间件写死。
+    """
 
     def __init__(self, app: "ASGIApp", gate: PrivilegeGate) -> None:
         self.app = app
@@ -108,17 +141,47 @@ class PrivilegeGateASGIMiddleware:
             )
             for k, v in scope.get("headers", [])
         }
-        creds = self.gate.extract_http_credentials(
+        creds, conflicts = self.gate.extract_http_credentials(
             header_map,
             authorization=header_map.get("authorization"),
         )
-        token = _creds_var.set(creds)
+        creds_with_meta = dict(creds)
+        if conflicts:
+            creds_with_meta["_conflicts"] = set(conflicts)
+        token = _creds_var.set(creds_with_meta)
+
         try:
-            pset = self.gate.resolve(creds)
-            if isinstance(self.gate.require_op(pset, "list"), Deny):
-                resp = JSONResponse({"detail": "Unauthorized"}, status_code=401)
+            from wcore.dataplane.transport_errors import deny_to_payload
+
+            pset = self.gate.resolve(creds, conflicts=conflicts)
+            if isinstance(pset, Deny):
+                payload = deny_to_payload(pset)
+                resp = JSONResponse(
+                    {
+                        "detail": payload["detail"],
+                        "code": payload["code"],
+                        "reason": payload["reason"],
+                    },
+                    status_code=int(payload["status"]),
+                )
                 await resp(scope, receive, send)
                 return
+
+            # 策略 A：传输地板 = query（list→op_map）；发现与会话均不可绕过
+            outcome = self.gate.require_op(pset, "list")  # type: ignore[arg-type]
+            if isinstance(outcome, Deny):
+                payload = deny_to_payload(outcome)
+                resp = JSONResponse(
+                    {
+                        "detail": payload["detail"],
+                        "code": payload["code"],
+                        "reason": payload["reason"],
+                    },
+                    status_code=int(payload["status"]),
+                )
+                await resp(scope, receive, send)
+                return
+
             await self.app(scope, receive, send)
         finally:
             _creds_var.reset(token)
@@ -151,8 +214,15 @@ def mount_mcp_http(
     *,
     prefix: str,
     name: str = "wcore-plane",
+    strict: bool = False,
 ) -> tuple:
     """挂载 MCP 到 ``prefix``（如 ``/api/v1/w3trade/mcp``）。
+
+    @satisfies WC-DEC-018 / WC-DEC-017
+
+    Args:
+        strict: 为 True 时强制 prefix 匹配 ``/api/v1/{app}/mcp``；
+            避免挂载到扫描高频 ``/mcp`` 别名路径（WC-DEC-018 MUST）。
 
     Returns:
         ``(mcp, session_manager)`` — 宿主 lifespan **MUST**
@@ -160,6 +230,15 @@ def mount_mcp_http(
     """
     if not HAS_MCP:
         raise RuntimeError("mcp package required for MCP plane (optional extra)")
+
+    import re
+
+    if strict:
+        if not re.fullmatch(r"/api/v1/[^/]+/mcp", prefix.rstrip("/")):
+            raise ValueError(
+                "WC-DEC-018: When strict=True, prefix MUST be /api/v1/{app}/mcp. "
+                f"Got {prefix!r} (MUST NOT alias to /mcp or other paths)."
+            )
 
     base = prefix.rstrip("/") or "/"
     mcp = build_plane_mcp(registry, gate, name=name)

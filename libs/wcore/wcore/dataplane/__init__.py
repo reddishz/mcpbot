@@ -8,7 +8,9 @@ from .privilege import (
     PrivilegeGate,
     PrivilegeSet,
     PrivilegeSpec,
+    assert_bind_scope_matches_listen,
     default_w3trade_specs,
+    is_loopback_listen_host,
 )
 from .registry import EntryMeta, PlaneRegistry
 from .shell import PlaneShell, TabResult
@@ -31,5 +33,7 @@ __all__ = [
     "PrivilegeSet",
     "PrivilegeSpec",
     "TabResult",
+    "assert_bind_scope_matches_listen",
     "default_w3trade_specs",
+    "is_loopback_listen_host",
 ]

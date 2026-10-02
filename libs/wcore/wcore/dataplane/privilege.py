@@ -11,6 +11,8 @@ from typing import Dict, Iterable, Mapping, Optional, Union
 logger = logging.getLogger(__name__)
 
 # 操作 kind → 权限名（WC-DEC-023）
+# 框架保留名 ``query`` 为读/发现地板；写/invoke 的默认名 ``trade`` 仅为常用约定，
+# 应用 MAY 用 op_map / PrivilegeSpec 换成其它高级权限名（w3trade 即用 trade）。
 DEFAULT_OP_MAP: Dict[str, str] = {
     "list": "query",
     "read": "query",
@@ -34,6 +36,15 @@ class PrivilegeSpec:
 
 @dataclass(frozen=True)
 class Deny:
+    """权限拒绝（判定层统一输出。
+
+    reason_code 语义约定 ``{category}:{detail}``：
+
+    * ``missing_privilege:{name}`` — 未持有 ``name`` 权限
+    * ``credential_conflict:{name}`` — ``name`` 的 Bearer 与 Header 不一致
+    * ``unknown_operation:{kind}`` — ``op_map`` 无该 ``operation_kind``
+    """
+
     reason_code: str
 
 
@@ -45,6 +56,11 @@ class _AllowType:
 
 
 Allow = _AllowType()
+
+
+def _reason_code(category: str, detail: str) -> str:
+    """构造形如 ``category:detail`` 的标准化 reason_code。"""
+    return f"{category}:{detail}"
 
 
 @dataclass(frozen=True)
@@ -104,20 +120,41 @@ class PrivilegeGate:
                 )
 
     def privilege_for(self, operation_kind: str) -> str:
+        """按 operation kind 返回权限名（WC-DEC-023）。缺失 kind 抛 KeyError。"""
         try:
             return self.op_map[operation_kind]
         except KeyError as exc:
             raise KeyError(f"unknown operation kind: {operation_kind!r}") from exc
+
+    def try_privilege_for(self, operation_kind: str) -> Union[str, Deny]:
+        """不抛异常的 ``privilege_for``：缺失 kind 时返回 ``Deny(unknown_operation)``。"""
+        try:
+            return self.op_map[operation_kind]
+        except KeyError:
+            return Deny(_reason_code("unknown_operation", operation_kind))
 
     def resolve(
         self,
         credential_map: Optional[Mapping[str, Optional[str]]] = None,
         *,
         bind_scope: Optional[str] = None,
-    ) -> PrivilegeSet:
+        conflicts: Optional[Iterable[str]] = None,
+    ) -> Union[PrivilegeSet, Deny]:
+        """段 A 解析。
+
+        @satisfies WC-CMP-005 / WC-R028
+
+        ``conflicts`` 可选集合用于标记 Bearer ↔ Header 同名冲突的权限名：
+        若某权限出现在 ``conflicts`` 中，直接以 ``Deny(credential_conflict:{name})``
+        返回（视为比 missing 更强的拒绝），不进入常量时间 compare。
+        """
         scope = bind_scope or self.bind_scope
         if scope == "local":
             return PrivilegeSet(frozenset(self._specs.keys()))
+        conflict_set = set(conflicts or ())
+        for name in sorted(conflict_set):
+            if name in self._specs:
+                return Deny(_reason_code("credential_conflict", name))
         creds = credential_map or {}
         held = set()
         for name, spec in self._specs.items():
@@ -133,22 +170,36 @@ class PrivilegeGate:
     ) -> Union[object, Deny]:
         for name in names:
             if not privilege_set.can(name):
-                return Deny(f"missing_privilege:{name}")
+                return Deny(_reason_code("missing_privilege", name))
         return Allow
 
     def require_op(
         self, privilege_set: PrivilegeSet, operation_kind: str
     ) -> Union[object, Deny]:
-        return self.require(privilege_set, self.privilege_for(operation_kind))
+        """``operation_kind → op_map → require``。
+
+        @satisfies WC-DEC-021 / WC-DEC-023
+        """
+        result = self.try_privilege_for(operation_kind)
+        if isinstance(result, Deny):
+            return result
+        return self.require(privilege_set, result)
 
     def extract_http_credentials(
         self,
         headers: Mapping[str, str],
         *,
         authorization: Optional[str] = None,
-    ) -> Dict[str, Optional[str]]:
-        """从 Header / Bearer 抽取 CredentialMap（WC-DEC-022）。"""
-        # normalize header lookup case-insensitive
+    ) -> tuple[Dict[str, Optional[str]], set[str]]:
+        """从 Header / Bearer 抽取 CredentialMap + 冲突集合。
+
+        @satisfies WC-DEC-022
+
+        Returns:
+            ``(credential_map, conflicts)`` — ``conflicts`` 内的权限名表示
+            Bearer 与 Header 同时给出但值不一致；应在 :meth:`resolve` 中
+            以 ``credential_conflict:{name}`` 结构化拒绝，不再进入 key compare。
+        """
         lower = {str(k).lower(): v for k, v in headers.items()}
         out: Dict[str, Optional[str]] = {}
         for name, spec in self._specs.items():
@@ -157,15 +208,16 @@ class PrivilegeGate:
                 presented = lower.get(spec.header.lower())
             out[name] = presented
 
+        conflicts: set[str] = set()
         bearer = _parse_bearer(authorization)
         if bearer is not None:
             header_q = out.get(PRIVILEGE_QUERY)
             if header_q and header_q != bearer:
-                # 冲突：标记为无效（用哨兵使 compare 失败）
-                out[PRIVILEGE_QUERY] = "\x00conflict"
+                conflicts.add(PRIVILEGE_QUERY)
+                out[PRIVILEGE_QUERY] = bearer
             elif not header_q:
                 out[PRIVILEGE_QUERY] = bearer
-        return out
+        return out, conflicts
 
 
 def _secrets_equal(presented: str, expected: str) -> bool:
@@ -195,3 +247,32 @@ def default_w3trade_specs(
         PrivilegeSpec(PRIVILEGE_QUERY, expected=query_key, header="X-Query-Key"),
         PrivilegeSpec(PRIVILEGE_TRADE, expected=trade_key, header="X-Trade-Key"),
     ]
+
+
+def is_loopback_listen_host(host: str) -> bool:
+    """判断监听 host 是否为本机环回（WC-R028 / BindScope）。"""
+    h = (host or "").strip().lower()
+    if not h:
+        return False
+    if h in ("127.0.0.1", "::1", "localhost"):
+        return True
+    if h.startswith("127."):
+        return True
+    return False
+
+
+def assert_bind_scope_matches_listen(*, bind_scope: str, listen_host: str) -> None:
+    """``local`` 满权限 **MUST NOT** 配非环回监听（防误暴露）。
+
+    ``network`` 可配任意 host。``listen_host`` 为空则跳过（未实际 listen）。
+    """
+    if bind_scope not in ("local", "network"):
+        raise ValueError(f"invalid bind_scope: {bind_scope!r}")
+    host = (listen_host or "").strip()
+    if not host:
+        return
+    if bind_scope == "local" and not is_loopback_listen_host(host):
+        raise ValueError(
+            f"bind_scope=local is incompatible with listen_host={host!r}; "
+            "use a loopback address (127.0.0.1 / ::1) or bind_scope=network"
+        )

@@ -15,6 +15,12 @@ except ImportError:  # pragma: no cover
 
 from wcore.dataplane.privilege import Deny, PrivilegeGate
 from wcore.dataplane.registry import EntryMeta, PlaneRegistry
+from wcore.dataplane.transport_errors import (
+    CODE_RATE_LIMITED,
+    CODE_VALIDATION_ERROR,
+    deny_to_payload,
+    registry_exc_to_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +92,10 @@ def create_plane_router(
     description: str = DEFAULT_PLANE_DESCRIPTION,
     tag: str = PLANE_API_TAG,
 ) -> Any:
-    """创建平面 APIRouter；鉴权经 PrivilegeGate（操作映射）。"""
+    """创建平面 APIRouter；鉴权经 PrivilegeGate（操作映射）。
+
+    @satisfies WC-DEC-024 / WC-RUL-045
+    """
     if not HAS_FASTAPI:
         raise RuntimeError("FastAPI required for plane HTTP (optional extra)")
 
@@ -102,6 +111,36 @@ def create_plane_router(
 
     router = APIRouter(tags=[tag], redirect_slashes=False)
 
+    def _http_deny(outcome: Deny) -> None:
+        """CMP-011：Deny → 结构化 HTTP（共用 transport_errors）。"""
+        payload = deny_to_payload(outcome)
+        raise HTTPException(
+            status_code=int(payload["status"]),
+            detail={
+                "code": payload["code"],
+                "detail": payload["detail"],
+                "reason": payload["reason"],
+            },
+        )
+
+    def _http_registry_exc(exc: BaseException, path: str) -> None:
+        payload = registry_exc_to_payload(exc, path=path)
+        detail: Dict[str, Any] = {
+            "code": payload["code"],
+            "path": payload.get("path", path),
+            "message": payload.get("message", str(exc)),
+        }
+        if payload["code"] == "NOT_FOUND":
+            seg = str(payload.get("segment") or registry.missing_segment(path))
+            detail["segment"] = seg
+            detail["hint"] = registry.path_hint(path, seg)
+        elif payload["code"] == "METHOD_NOT_ALLOWED":
+            detail["hint"] = (
+                "state endpoints are read-only; control endpoints require POST invoke; "
+                "discover POST targets with list=1 under the theme."
+            )
+        raise HTTPException(status_code=int(payload["status"]), detail=detail)
+
     def _authorize(
         operation_kind: str,
         *,
@@ -110,19 +149,25 @@ def create_plane_router(
         authorization: Optional[str],
         path_for_rate: str = "",
     ) -> None:
-        if operation_kind in ("write", "invoke") and check_write_rate is not None:
-            if not check_write_rate(path_for_rate):
-                raise HTTPException(status_code=429, detail="Too many requests")
+        # 先鉴权再流控：无钥/错钥不得因配额返回 429（防枚举与诊断混淆）
         headers = {}
         if x_query_key is not None:
             headers["X-Query-Key"] = x_query_key
         if x_trade_key is not None:
             headers["X-Trade-Key"] = x_trade_key
-        creds = gate.extract_http_credentials(headers, authorization=authorization)
-        pset = gate.resolve(creds)
-        outcome = gate.require_op(pset, operation_kind)
+        creds, conflicts = gate.extract_http_credentials(headers, authorization=authorization)
+        pset = gate.resolve(creds, conflicts=conflicts)
+        if isinstance(pset, Deny):
+            _http_deny(pset)
+        outcome = gate.require_op(pset, operation_kind)  # type: ignore[arg-type]
         if isinstance(outcome, Deny):
-            raise HTTPException(status_code=401, detail="Unauthorized")
+            _http_deny(outcome)
+        if operation_kind in ("write", "invoke") and check_write_rate is not None:
+            if not check_write_rate(path_for_rate):
+                raise HTTPException(
+                    status_code=429,
+                    detail={"code": CODE_RATE_LIMITED, "detail": "Too many requests"},
+                )
 
     async def plane_get(
         full_path: str = "",
@@ -152,21 +197,8 @@ def create_plane_router(
 
         try:
             return await registry.read(path, depth=depth)
-        except KeyError as exc:
-            raise _not_found(registry, path, str(exc)) from exc
-        except PermissionError as exc:
-            raise HTTPException(
-                status_code=405,
-                detail={
-                    "code": "METHOD_NOT_ALLOWED",
-                    "path": path,
-                    "message": str(exc),
-                    "hint": (
-                        "state endpoints are read-only; control endpoints require POST invoke; "
-                        "discover POST targets with list=1 under the theme."
-                    ),
-                },
-            ) from exc
+        except (KeyError, PermissionError, ValueError) as exc:
+            _http_registry_exc(exc, path)
 
     async def plane_put(
         full_path: str,
@@ -184,23 +216,22 @@ def create_plane_router(
             path_for_rate=path,
         )
         if "value" not in body:
-            raise HTTPException(status_code=422, detail="body must contain value")
+            raise HTTPException(
+                status_code=422,
+                detail={"code": CODE_VALIDATION_ERROR, "message": "body must contain value"},
+            )
         if "at" in body or "after" in body:
             raise HTTPException(
                 status_code=422,
-                detail="at/after belong to POST pause, not PUT",
+                detail={
+                    "code": CODE_VALIDATION_ERROR,
+                    "message": "at/after belong to POST pause, not PUT",
+                },
             )
         try:
             return await registry.write(path, body["value"])
-        except KeyError as exc:
-            raise _not_found(registry, path, str(exc)) from exc
-        except PermissionError as exc:
-            raise HTTPException(
-                status_code=405,
-                detail={"code": "METHOD_NOT_ALLOWED", "path": path, "message": str(exc)},
-            ) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (KeyError, PermissionError, ValueError) as exc:
+            _http_registry_exc(exc, path)
 
     async def plane_post(
         full_path: str,
@@ -219,10 +250,8 @@ def create_plane_router(
         )
         try:
             result = await registry.invoke(path, body or {})
-        except KeyError as exc:
-            raise _not_found(registry, path, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (KeyError, PermissionError, ValueError) as exc:
+            _http_registry_exc(exc, path)
         except Exception as exc:
             logger.exception("plane invoke failed: %s", path)
             return JSONResponse(
@@ -300,7 +329,10 @@ def mount_plane_http(
     description: str = DEFAULT_PLANE_DESCRIPTION,
     protect_openapi: bool = True,
 ) -> Any:
-    """挂载平面路由；可选保护 OpenAPI（须 query）。"""
+    """挂载平面路由；可选保护 OpenAPI（须 query）。
+
+    @satisfies WC-DEC-024 / WC-RUL-047
+    """
     router = create_plane_router(
         registry,
         gate,
@@ -314,7 +346,10 @@ def mount_plane_http(
 
 
 def install_openapi_privilege_gate(app: Any, gate: PrivilegeGate) -> None:
-    """网络域下 OpenAPI / docs 须持有 query（WC-RUL-046）。"""
+    """网络域下 OpenAPI / docs 须持有 query（WC-RUL-046）。
+
+    @satisfies WC-RUL-046 #1
+    """
     if not HAS_FASTAPI:
         return
 
@@ -323,11 +358,30 @@ def install_openapi_privilege_gate(app: Any, gate: PrivilegeGate) -> None:
         path = request.url.path
         if path.endswith("/openapi.json") or path in ("/docs", "/redoc") or path.endswith("/docs") or path.endswith("/redoc"):
             headers = {k: v for k, v in request.headers.items()}
-            creds = gate.extract_http_credentials(
+            creds, conflicts = gate.extract_http_credentials(
                 headers,
                 authorization=request.headers.get("authorization"),
             )
-            pset = gate.resolve(creds)
-            if isinstance(gate.require_op(pset, "openapi"), Deny):
-                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            pset = gate.resolve(creds, conflicts=conflicts)
+            if isinstance(pset, Deny):
+                payload = deny_to_payload(pset)
+                return JSONResponse(
+                    status_code=int(payload["status"]),
+                    content={
+                        "detail": payload["detail"],
+                        "code": payload["code"],
+                        "reason": payload["reason"],
+                    },
+                )
+            outcome = gate.require_op(pset, "openapi")  # type: ignore[arg-type]
+            if isinstance(outcome, Deny):
+                payload = deny_to_payload(outcome)
+                return JSONResponse(
+                    status_code=int(payload["status"]),
+                    content={
+                        "detail": payload["detail"],
+                        "code": payload["code"],
+                        "reason": payload["reason"],
+                    },
+                )
         return await call_next(request)
