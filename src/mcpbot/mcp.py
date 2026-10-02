@@ -75,10 +75,14 @@ _DETAIL_LIMIT = 300
 
 @dataclass(frozen=True)
 class ToolDescriptor:
-    """一个可编排使用的工具；mapping 在同部署内唯一，同名工具靠它区分（IF-006、AC-009）。"""
+    """一个可编排使用的工具；mapping 在同部署内唯一，同名工具靠它区分（IF-006、AC-009）。
+
+    display_name 取上游自述的展示名称，与 description、input_schema 同属不可信数据，只用于呈现。
+    """
 
     service_id: str
     tool_name: str
+    display_name: str
     description: str
     input_schema: Dict[str, Any]
     mapping: str
@@ -180,6 +184,7 @@ class McpAccess:
                 ToolDescriptor(
                     service_id=service_id,
                     tool_name=tool.name,
+                    display_name=tool.title or tool.name,
                     description=tool.description or "",
                     input_schema=schema,
                     mapping=f"{service_id}/{tool.name}",
@@ -296,8 +301,9 @@ class McpAccess:
             statuses.append(response.status_code)
 
         http.event_hooks["response"].append(record)
+        # 不设等待下限：剩余预算多小就等多久，远程等待不绕过调用方的剩余时限（IF-006、NFR-006）
         try:
-            async with asyncio.timeout(max(1.0, remaining_seconds)):
+            async with asyncio.timeout(remaining_seconds):
                 async with Client(streamable_http_client(svc.url, http_client=http),
                                   raise_exceptions=False) as client:
                     yield client
@@ -408,6 +414,8 @@ def _classify(exc: BaseException, statuses: List[int]) -> Tuple[str, str]:
 
     chain = _exception_chain(exc)
     failing = [status for status in statuses if status >= 400]
+    # 202 没有响应体：请求被接受而未取得结果，属传输层证据（RUL-010）
+    accepted_without_result = 202 in statuses
 
     # 凭据被拒只有传输层载体，取得该证据就不向其他层推定（RUL-010 鉴权证据的唯一性）
     refused = next((status for status in statuses if status in _TRANSPORT_AUTH), None)
@@ -421,6 +429,9 @@ def _classify(exc: BaseException, statuses: List[int]) -> Tuple[str, str]:
         if node.error.code == INTERNAL_ERROR and failing:
             # SDK 用同一个协议层错误复述非 2xx 响应，此时可用证据只有状态码
             return _by_transport(failing[-1], message)
+        if node.error.code == INVALID_REQUEST and accepted_without_result:
+            # SDK 也用请求不合法复述 202，此处不能据它判为可判定未执行
+            return STATUS_UNAVAILABLE, "发生阶段=传输层：上游以 HTTP 202 接受请求但未返回结果"
         if node.error.code in _PROTOCOL_ERROR_CODES:
             return STATUS_PROTOCOL, _bound(f"发生阶段=协议消息层：{message}")
         return STATUS_UNAVAILABLE, _bound(f"发生阶段=协议消息层：{message}")
