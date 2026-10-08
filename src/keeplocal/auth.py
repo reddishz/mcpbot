@@ -15,14 +15,14 @@ from typing import Deque, Dict, Optional, Sequence
 from fastapi import HTTPException, Request
 from wcore.dataplane.privilege import AccessContext, Allow, Deny, PrivilegeGate, TokenStore
 
-from .config import McpBotConfig
+from .config import KeepLocalConfig
 
 # 凭证文件词干：框架据此得到 {stem}.tokens.yaml 与 {stem}.token-status.yaml
-TOKEN_STEM = "mcpbot"
+TOKEN_STEM = "keeplocal"
 
 
 class SiteAuth:
-    def __init__(self, cfg: McpBotConfig) -> None:
+    def __init__(self, cfg: KeepLocalConfig) -> None:
         data_dir = Path(cfg.storage.data_dir).expanduser().resolve()
         # 凭证文件缺失时由框架生成；内容非法时框架按致命处理，不在请求期才暴露
         self.store = TokenStore(data_dir, stem=TOKEN_STEM)

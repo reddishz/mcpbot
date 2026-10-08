@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable, Dict, List, Optional, Tuple
 
-from .config import McpBotConfig
+from .config import KeepLocalConfig
 from .history import HistoryStore
 from .ollama import OllamaClient, TurnResult
 
@@ -88,7 +88,7 @@ class ExecutionSlot:
 
 
 class ChatOrchestrator:
-    def __init__(self, cfg: McpBotConfig, history: HistoryStore, ollama: OllamaClient) -> None:
+    def __init__(self, cfg: KeepLocalConfig, history: HistoryStore, ollama: OllamaClient) -> None:
         self._cfg = cfg
         self._history = history
         self._ollama = ollama

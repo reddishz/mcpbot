@@ -23,18 +23,18 @@ from wcore.app_context import AppContext
 from wcore.dataplane.privilege import AccessContext, PLANE_READ, PLANE_WRITE
 
 from .auth import AuthAttemptLimiter, SiteAuth, client_source, read_limited_body
-from .config import McpBotConfig, unavailable_services, validate_config
+from .config import KeepLocalConfig, unavailable_services, validate_config
 from .durable import DomainLock, DomainLockHeld, PersistenceUnavailable
 from .history import HistoryStore
 from .ollama import OllamaClient
 from .orchestration import ChatOrchestrator, SlotBusy
 
-SUBSYSTEM = "mcpbot"
+SUBSYSTEM = "keeplocal"
 _PKG_DIR = Path(__file__).resolve().parent
 
 
 class AppState:
-    def __init__(self, cfg: McpBotConfig, history: HistoryStore, ollama: OllamaClient, orchestrator: ChatOrchestrator, auth: SiteAuth):
+    def __init__(self, cfg: KeepLocalConfig, history: HistoryStore, ollama: OllamaClient, orchestrator: ChatOrchestrator, auth: SiteAuth):
         self.cfg = cfg
         self.history = history
         self.ollama = ollama
@@ -55,13 +55,13 @@ def _asset_version() -> str:
 
 
 def create_app(state: AppState) -> FastAPI:
-    app = FastAPI(title="mcpbot", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="keeplocal", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=str(_PKG_DIR / "static")), name="static")
     templates = Jinja2Templates(directory=str(_PKG_DIR / "templates"))
     asset_version = _asset_version()
 
     def current_state(request: Request) -> AppState:
-        return request.app.state.mcpbot
+        return request.app.state.keeplocal
 
     def _entry_guard(required_scopes: Sequence[str]):
         """按 IF-001 的范围口径生成入口依赖：凭据无效与范围不足同形呈现，不披露所缺范围。"""
@@ -205,7 +205,7 @@ def _frame(event: Dict[str, object]) -> bytes:
 # ---------- 启动装配 ----------
 
 
-def build_state(cfg: McpBotConfig) -> AppState:
+def build_state(cfg: KeepLocalConfig) -> AppState:
     data_dir = Path(cfg.storage.data_dir).expanduser().resolve()
     history = HistoryStore(data_dir)
     ollama = OllamaClient(cfg.ollama)
@@ -213,7 +213,7 @@ def build_state(cfg: McpBotConfig) -> AppState:
     return AppState(cfg, history, ollama, orchestrator, SiteAuth(cfg))
 
 
-def startup_checks(cfg: McpBotConfig, log: logging.Logger) -> List[str]:
+def startup_checks(cfg: KeepLocalConfig, log: logging.Logger) -> List[str]:
     """启动核对项：返回致命诊断，空列表表示通过；MCP 单条目无效只告警跳过。"""
 
     runtime = AppContext.runtime_config
@@ -239,8 +239,8 @@ def _refuse(lines: List[str]) -> int:
 
 def main() -> int:
     # extra_args 留空即由 AppContext 取 sys.argv[1:]；传 [] 会让 --help/--dump/--workdir 全部失效
-    AppContext(McpBotConfig, SUBSYSTEM)
-    cfg: McpBotConfig = AppContext.config
+    AppContext(KeepLocalConfig, SUBSYSTEM)
+    cfg: KeepLocalConfig = AppContext.config
     log = AppContext.logger
     faults = startup_checks(cfg, log)
     if faults:
@@ -270,9 +270,9 @@ def main() -> int:
         log.warning("以下业务 MCP 服务配置结构无效，启动阶段跳过：%s", unavailable_services(cfg))
 
     app = create_app(state)
-    app.state.mcpbot = state
+    app.state.keeplocal = state
     log.info(
-        "mcpbot 启动：监听 %s:%s，记录域 %s，公网模式 %s",
+        "keeplocal 启动：监听 %s:%s，记录域 %s，公网模式 %s",
         cfg.web.listen_host,
         cfg.web.listen_port,
         data_dir,

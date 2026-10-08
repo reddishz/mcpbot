@@ -118,7 +118,7 @@ class WebSection:
 
 @config_class
 @dataclass
-class McpBotConfig:
+class KeepLocalConfig:
     """本站应用层配置（AppContext 的唯一 config_cls）。"""
 
     site: SiteSection = field(default_factory=SiteSection)
@@ -135,7 +135,7 @@ def _range_check(section: str, name: str, value: int, table: dict, faults: List[
         faults.append(f"{section}.{name}={value} 超出允许区间 [{low}, {high}]")
 
 
-def validate_config(cfg: McpBotConfig) -> List[str]:
+def validate_config(cfg: KeepLocalConfig) -> List[str]:
     """逐段结构校验，返回可定位到段的诊断（FLW-004 关键步骤）。"""
 
     faults: List[str] = []
@@ -166,7 +166,7 @@ def validate_config(cfg: McpBotConfig) -> List[str]:
     return faults
 
 
-def unavailable_services(cfg: McpBotConfig) -> List[str]:
+def unavailable_services(cfg: KeepLocalConfig) -> List[str]:
     """按 FLW-004 异常分支筛出结构无效、只能判不可用的服务标识。"""
 
     bad = []
@@ -179,7 +179,7 @@ def unavailable_services(cfg: McpBotConfig) -> List[str]:
     return bad
 
 
-def allowed_tools_for(cfg: McpBotConfig, service_id: str) -> Optional[List[str]]:
+def allowed_tools_for(cfg: KeepLocalConfig, service_id: str) -> Optional[List[str]]:
     """服务标识到允许工具集合；未配置该服务时返回 None 表示不开放任何调用。"""
 
     for svc in cfg.mcp.services:

@@ -6,8 +6,8 @@ ued/
 .git/
 
 # 运行数据与部署配置：站点凭据、记录域、日志一律不入库
-mcpbot.yaml
-mcpbot-work/
+keeplocal.yaml
+keeplocal-work/
 *.log
 
 # 构建与运行产物

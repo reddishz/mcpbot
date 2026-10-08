@@ -25,7 +25,7 @@ from mcp.client.streamable_http import create_mcp_http_client, streamable_http_c
 from mcp.shared.exceptions import MCPError
 from mcp_types import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR
 
-from .config import McpBotConfig, McpService
+from .config import KeepLocalConfig, McpService
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ class CallResult:
 class McpAccess:
     """按服务持有连接状态与发现快照；发现 lazy 到该服务首次被使用（FLW-004）。"""
 
-    def __init__(self, cfg: McpBotConfig) -> None:
+    def __init__(self, cfg: KeepLocalConfig) -> None:
         self._cfg = cfg
         self._cache: Dict[str, Tuple[str, List[ToolDescriptor]]] = {}
         self._status: Dict[str, Tuple[str, str]] = {}

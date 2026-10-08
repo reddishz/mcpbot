@@ -1,5 +1,5 @@
 [project]
-name = "mcpbot"
+name = "keeplocal"
 version = "0.1.0"
 description = "自托管单用户 Web Agent：浏览器到本站，本站接外部 Ollama 与业务端 MCP Server"
 requires-python = ">=3.13"
@@ -23,7 +23,7 @@ mcp = [
 ]
 
 [project.scripts]
-mcpbot = "mcpbot.app:main"
+keeplocal = "keeplocal.app:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -33,4 +33,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-mcpbot = ["templates/*.html", "static/*"]
+keeplocal = ["templates/*.html", "static/*"]

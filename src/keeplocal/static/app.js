@@ -2,7 +2,7 @@
 // 凭据只保存在 sessionStorage：离开标签页即失效，页面跳转与静态资源一律不附带认证头。
 "use strict";
 
-const KEY_NAME = "mcpbot.key";
+const KEY_NAME = "keeplocal.key";
 const $ = (id) => document.getElementById(id);
 
 const ui = {

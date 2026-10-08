@@ -1,10 +1,10 @@
-# mcpbot 部署配置示例：复制为 workdir 下的 mcpbot.yaml 后按部署环境取值。
+# keeplocal 部署配置示例：复制为 workdir 下的 keeplocal.yaml 后按部署环境取值。
 #
-# 文件名与位置由 wcore 的 AppContext 决定：在 workdir 下按 mcpbot.yaml / mcpbot.yml 查找。
+# 文件名与位置由 wcore 的 AppContext 决定：在 workdir 下按 keeplocal.yaml / keeplocal.yml 查找。
 # 未找到配置文件时 wcore 会静默使用默认值，本站的启动核对会因此拒绝启动，不接受该形态。
 # 执行预算段与 Ollama 段仅随进程重启生效；业务 MCP 服务段支持运行期受控刷新。
 #
-# 站点凭据不在本文件：它由 data/ 下的凭证文件（mcpbot.tokens.yaml）承载，首次启动时由底层框架
+# 站点凭据不在本文件：它由 data/ 下的凭证文件（keeplocal.tokens.yaml）承载，首次启动时由底层框架
 # 生成，一枚凭据对应一组由维护者配置的权限范围，更换随进程重启生效。
 
 notification:
